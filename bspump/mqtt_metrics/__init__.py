@@ -134,11 +134,13 @@ class MQTTService(asab.Service):
         )
         pipeline_components_pattern = r"^/c/(?P<deployment_identifier>[^/]+)/c/(?P<pipeline_identifier>[^/]+)/topology/subscribe$"
         events_pattern = r"^/c/(?P<deployment_identifier>[^/]+)/c/(?P<pipeline_identifier>[^/]+)/c/(?P<component_identifier>[^/]+)/events/subscribe$"
+        metrics_pattern = r"^/c/(?P<deployment_identifier>[^/]+)/c/(?P<pipeline_identifier>[^/]+)/c/(?P<component_identifier>[^/]+)/metrics/subscribe$"
 
         # Matching
         pipelines_list = re.match(pipelines_list_pattern, topic)
         pipeline_components = re.match(pipeline_components_pattern, topic)
         events = re.match(events_pattern, topic)
+        metrics = re.match(metrics_pattern, topic)
 
         # Get list of pipelines from application
         try:
@@ -191,6 +193,19 @@ class MQTTService(asab.Service):
                     count, pipeline.PublishingProcessors[processor]
                 )
 
+        if metrics:
+            pipeline = metrics.group("pipeline_identifier")
+            processor = metrics.group("component_identifier")
+            pipeline = svc.locate(f"{pipeline}")
+
+            source = pipeline.locate_source(f"{processor}")
+            if source is not None:
+                source.MetricsToPublish = count
+            else:
+                pipeline.MetricsProcessors[processor]["count"] = max(
+                    count, pipeline.MetricsProcessors[processor]["count"]
+                )
+
     # Callback when connected to the MQTT broker
     def on_connect(self, client, userdata, flags, rc):
         self.apply_subscriptions()
@@ -209,6 +224,7 @@ class MQTTService(asab.Service):
 
     def subscribe(self, pipeline, component):
         self.sub_queue.append(f"c/{pipeline}/c/{component}/events/subscribe")
+        self.sub_queue.append(f"c/{pipeline}/c/{component}/metrics/subscribe")
         if self.connected:
             self.apply_subscriptions()
 
@@ -221,5 +237,15 @@ class MQTTService(asab.Service):
         data["remaining_subscription_count"] = count_remaining
         self.client.publish(
             f"/c/{self.App.DeploymentId}/c/{pipeline}/c/{component.Id}/events",
+            json.dumps(data),
+        )
+
+    def publish_metrics(self, pipeline, processor_id, metrics_data, count_remaining):
+        # test metrics
+        data = {}
+        data["data"] = metrics_data
+        data["remaining_subscription_count"] = count_remaining
+        self.client.publish(
+            f"/c/{self.App.DeploymentId}/c/{pipeline}/c/{processor_id}/metrics",
             json.dumps(data),
         )

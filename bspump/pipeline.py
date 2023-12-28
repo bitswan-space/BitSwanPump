@@ -82,6 +82,7 @@ class Pipeline(abc.ABC, asab.Configurable):
 
 		self.MQTTService = app.get_service("bspump.MQTTService")
 		self.PublishingProcessors = {}
+		self.MetricsProcessors = {}
 
 		# Ensuring the uniqueness of the alert for each pipeline
 		self.Alert_id = self.Config.get("alert_id", str(uuid.uuid4()))
@@ -139,6 +140,11 @@ class Pipeline(abc.ABC, asab.Configurable):
 			self._on_metrics_flush
 		)
 
+		app.PubSub.subscribe(
+			"Application.tick!",
+			self.on_tick_update_metrics
+		)
+
 		# Pipeline logger
 		self.L = PipelineLogger(
 			"bspump.pipeline.{}".format(self.Id),
@@ -160,6 +166,35 @@ class Pipeline(abc.ABC, asab.Configurable):
 		self._chillout_counter = 0
 
 		self._context = {}
+
+
+	def on_tick_update_metrics(self, message_type):
+		"""
+		Updates metrics each tick available for MQTT
+		"""
+		for processor_id in self.MetricsProcessors:
+			for field in self.MetricsProcessors[processor_id]["data"].Storage["fieldset"]:
+				values = field
+
+			# check for number of requested metrics from MQTT service
+			if self.MetricsProcessors[processor_id]["count"] > 0:
+
+				# update metrics
+				current_metrics = {}
+
+				current_metrics["event.in"] = self.MetricsProcessors[processor_id]["data"].Storage["fieldset"][0]["actuals"]["event.in"]
+				current_metrics["event.out"] = self.MetricsProcessors[processor_id]["data"].Storage["fieldset"][0]["actuals"]["event.out"]
+				current_metrics["event.drop"] = self.MetricsProcessors[processor_id]["data"].Storage["fieldset"][0]["actuals"]["event.drop"]
+
+				self.MQTTService.publish_metrics(self.Id, processor_id, current_metrics, self.MetricsProcessors[processor_id]["count"])
+
+				# decrement current value
+				self.MetricsProcessors[processor_id]["count"] -= 1
+
+			# reset metrics set to 0
+			self.MetricsProcessors[processor_id]["data"].Storage["fieldset"][0]["actuals"]["event.in"] = 0
+			self.MetricsProcessors[processor_id]["data"].Storage["fieldset"][0]["actuals"]["event.out"] = 0
+			self.MetricsProcessors[processor_id]["data"].Storage["fieldset"][0]["actuals"]["event.drop"] = 0
 
 	def time(self):
 		"""
@@ -456,6 +491,7 @@ class Pipeline(abc.ABC, asab.Configurable):
 			t0 = time.perf_counter()
 			try:
 				self.ProcessorsCounter[processor.Id].add('event.in', 1)
+				self.MetricsProcessors[processor.Id]["data"].add('event.in', 1)
 				event = processor.process(context, event)
 				processor.EventCount += 1
 				if self.MQTTService and processor.Id in self.PublishingProcessors.keys() and self.PublishingProcessors[processor.Id] > 0:
@@ -463,6 +499,7 @@ class Pipeline(abc.ABC, asab.Configurable):
 					self.PublishingProcessors[processor.Id] -= 1
 			except BaseException as e:
 				self.ProcessorsCounter[processor.Id].add('event.drop', 1)
+				self.MetricsProcessors[processor.Id]["data"].add('event.drop', 1)
 				if depth > 0:
 					raise  # Handle error on the top depth
 				self.set_error(context, event, e)
@@ -470,6 +507,7 @@ class Pipeline(abc.ABC, asab.Configurable):
 
 			finally:
 				self.ProcessorsCounter[processor.Id].add('event.out', 1)
+				self.MetricsProcessors[processor.Id]["data"].add('event.out', 1)
 				self.ProfilerCounter[processor.Id].add('duration', time.perf_counter() - t0)
 				self.ProfilerCounter[processor.Id].add('run', 1)
 
@@ -481,6 +519,7 @@ class Pipeline(abc.ABC, asab.Configurable):
 						self.MetricsCounter.add('event.out', 1)
 					else:
 						self.ProcessorsCounter[processor.Id].add('event.drop', 1)
+						self.MetricsProcessors[processor.Id]["data"].add('event.drop', 1)
 						self.MetricsEPSCounter.add('eps.drop', 1)
 						self.MetricsCounter.add('event.drop', 1)
 				return
@@ -773,6 +812,18 @@ class Pipeline(abc.ABC, asab.Configurable):
 			}
 		)
 
+		self.MetricsProcessors[processor.Id] = {}
+		self.MetricsProcessors[processor.Id]["data"] = self.ProcessorsGaugeCounter = self.MetricsService.create_counter(
+			"bspump.pipeline.metricscounter",
+			tags={'pipeline': self.Id},
+			init_values={
+				'event.in': 0,
+				'event.out': 0,
+				'event.drop': 0,
+			},
+			reset=False,
+		)
+
 		if isinstance(processor, Analyzer):
 			self.ProfilerCounter['analyzer_' + processor.Id] = self.MetricsService.create_counter(
 				'bspump.pipeline.profiler',
@@ -786,6 +837,7 @@ class Pipeline(abc.ABC, asab.Configurable):
 
 		if self.MQTTService:
 			self.PublishingProcessors[processor.Id] = 0
+			self.MetricsProcessors[processor.Id]["count"] = 0
 			self.MQTTService.subscribe(self.Id, processor.Id)
 
 	def build(self, source, *processors):

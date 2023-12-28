@@ -40,9 +40,36 @@ class Source(asab.Configurable):
 
 		self.MQTTService = app.get_service("bspump.MQTTService")
 
+		self.PubSub = asab.PubSub(app)
+
+		app.PubSub.subscribe(
+			"Application.tick!",
+			self.on_tick_update_source_metrics
+		)
+
 		self.EventCount = 0
 		self.EventsToPublish = 0
+		self.MetricsToPublish = 0
+		self.LastEventCount = 0
 
+	def on_tick_update_source_metrics(self, event_name):
+		"""
+		Updates metrics each tick available for MQTT
+		"""
+		if self.MetricsToPublish > 0:
+			current_eps = abs(self.EventCount - self.LastEventCount)
+			self.LastEventCount = self.EventCount
+
+			metrics_data = {
+				"event.in" : 0,
+				"event.out" : current_eps,
+				"event.drop" : 0,
+			}
+
+			self.MQTTService.publish_metrics(self.Pipeline.Id, self.Id, metrics_data , self.MetricsToPublish)
+			self.MetricsToPublish -= 1
+
+		pass
 
 	async def process(self, event, context=None):
 		"""
