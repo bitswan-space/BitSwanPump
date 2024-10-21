@@ -18,7 +18,39 @@ from .abc.source import Source
 from .analyzer import Analyzer
 from .exception import ProcessingError
 
-#
+from dataclasses import dataclass
+from queue import Queue
+from threading import Lock
+
+
+@dataclass(frozen=True)
+class LoggedException:
+    context: str
+    event: str
+    exc: Exception
+    traceback: str
+
+
+class LruQueue(Queue):
+    def __init__(self, maxsize=100):
+        super().__init__(maxsize=maxsize)
+        self.total = 0
+        self.lock = Lock()
+
+    def put(self, item):
+        with self.lock:
+            self.total += 1
+            if self.full():
+                self.get_nowait()
+            super().put(item)
+
+    def put_nowait(self, item):
+        with self.lock:
+            self.total += 1
+            if self.full():
+                self.get_nowait()
+            super().put_nowait(item)
+
 
 L = logging.getLogger(__name__)
 
@@ -99,6 +131,8 @@ class Pipeline(abc.ABC, asab.Configurable):
             []
         ]  # List of lists of processors, the depth is increased by a Generator object
         self.Sinks = []
+
+        self.exceptions = LruQueue(maxsize=100)
 
         # Publish-Subscribe for this pipeline
         self.PubSub = asab.PubSub(app)
@@ -262,6 +296,15 @@ class Pipeline(abc.ABC, asab.Configurable):
         else:
             tb_text = "".join(traceback.format_exception(None, exc, exc.__traceback__))
 
+            self.exceptions.put(
+                LoggedException(
+                    context=context,
+                    event=event,
+                    exc=exc,
+                    traceback=tb_text,
+                )
+            )
+
             # send alert
             self.App.AlertService.trigger(
                 source=self.App.__class__.__name__,
@@ -338,7 +381,6 @@ class Pipeline(abc.ABC, asab.Configurable):
         |
 
         """
-
         return not self.StopOnErrors
 
     def link(self, ancestral_pipeline):
